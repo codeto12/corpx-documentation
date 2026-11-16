@@ -1,0 +1,176 @@
+name: CorpX Documentation CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.gitignore'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'LICENSE'
+      - 'LICENSE.txt'
+
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '.gitignore'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'LICENSE'
+      - 'LICENSE.txt'
+
+  workflow_dispatch:
+
+# One active run for this workflow; newer events cancel older runs.
+concurrency:
+  group: corpx-documentation
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      URL_CHECKER_TIMEOUT: ${{ vars.URL_CHECKER_TIMEOUT || '5' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache node_modules
+        id: npm-cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-20-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        if: steps.npm-cache.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: Run all linters
+        run: npm run lint:all
+
+      - name: Run URL checker
+        run: node script/url-checker.js -t "$URL_CHECKER_TIMEOUT" -d src/posts
+
+      - name: Run all remaining scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              script/url-checker.js) continue ;;
+              *.js) node "$file" ;;
+              *.sh) bash "$file" ;;
+            esac
+          done < <(find script -type f \( -name '*.js' -o -name '*.sh' \) -print0)
+
+  build:
+    name: Build
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Restore node_modules cache
+        id: npm-cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-20-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        if: steps.npm-cache.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: Build production site
+        env:
+          NODE_ENV: production
+          PATH_PREFIX: /${{ github.event.repository.name }}/
+        run: npm run eleventy:prod
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy
+    needs: [test, build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      issues: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download built site
+        uses: actions/download-artifact@v4
+        with:
+          name: github-pages
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Create deployment status issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_OUTCOME: ${{ steps.deployment.outcome }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          if [ "$DEPLOY_OUTCOME" = "success" ]; then
+            STATUS="succeeded"
+          else
+            STATUS="failed"
+          fi
+
+          DATE=$(date -u +'%Y-%m-%d')
+          URL="${PAGE_URL:-https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/}"
+
+          gh issue create \
+            --title "$DATE - Deployment: $STATUS" \
+            --body "URL: $URL
+
+          Commit: https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA
+          Workflow: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+          if [ "$STATUS" = "failed" ]; then
+            exit 1
+          fi
