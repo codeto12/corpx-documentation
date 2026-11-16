@@ -1,6 +1,5 @@
 require('dotenv').config();
 
-const { execSync } = require('child_process');
 const dateFilter = require('./src/filters/date-filter.js');
 const eleventyNavigationPlugin = require('@11ty/eleventy-navigation');
 const htmlMinTransform = require('./src/transforms/html-min-transform.js');
@@ -58,9 +57,6 @@ module.exports = config => {
 
   config.setLibrary('md', markdownLib);
 
-  config.on('eleventy.after', () => {
-    execSync(`npx pagefind --source _site --glob \"**/*.html\"`, { encoding: 'utf-8' })
-  });
 
   // Required for eleventy to run on GitHub Pages
   // as the site URL will be https://<username>.github.io/<repo>/index.html
